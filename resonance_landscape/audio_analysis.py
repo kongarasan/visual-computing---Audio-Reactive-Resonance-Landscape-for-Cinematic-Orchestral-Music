@@ -30,6 +30,8 @@ class AudioFeatures:
 
     amplitude: np.ndarray      # (n_frames,)
     bass: np.ndarray           # (n_frames,)
+    melody: np.ndarray         # (n_frames,)  mid-frequency energy -> color hue shift
+    treble: np.ndarray         # (n_frames,)  high-frequency energy -> brightness/sparkle
     onset: np.ndarray          # (n_frames,)
     spectrum: np.ndarray       # (n_frames, n_bands)
     waveform: np.ndarray       # (n_frames, n_bands)  smoothed band envelopes
@@ -39,6 +41,8 @@ class AudioFeatures:
         return {
             "amplitude": float(self.amplitude[i]),
             "bass": float(self.bass[i]),
+            "melody": float(self.melody[i]),
+            "treble": float(self.treble[i]),
             "onset": float(self.onset[i]),
             "spectrum": self.spectrum[i],
             "waveform": self.waveform[i],
@@ -101,6 +105,16 @@ def analyze(
     bass_raw = S[bass_mask, :].sum(axis=0)
     bass = _normalize(bass_raw)
 
+    # --- Melody energy (200-2000 Hz) ------------------------------------------
+    melody_mask = (freqs >= 200) & (freqs <= 2000)
+    melody_raw = S[melody_mask, :].sum(axis=0)
+    melody = _normalize(melody_raw)
+
+    # --- Treble energy (4000-12000 Hz) ----------------------------------------
+    treble_mask = (freqs >= 4000) & (freqs <= 12000)
+    treble_raw = S[treble_mask, :].sum(axis=0)
+    treble = _normalize(treble_raw)
+
     # --- Onset strength --------------------------------------------------------
     onset_env = librosa.onset.onset_strength(y=y, sr=sr, hop_length=hop)
     onset = _normalize(onset_env, percentile=97.0)
@@ -125,6 +139,8 @@ def analyze(
     # --- Resample everything onto the video frame grid ------------------------
     amplitude = _resample_to_frames(amplitude, n_frames)
     bass = _resample_to_frames(bass, n_frames)
+    melody = _resample_to_frames(melody, n_frames)
+    treble = _resample_to_frames(treble, n_frames)
     onset = _resample_to_frames(onset, n_frames)
     spectrum = _resample_to_frames(spectrum, n_frames)
 
@@ -143,6 +159,8 @@ def analyze(
         n_bands=n_bands,
         amplitude=amplitude,
         bass=bass,
+        melody=melody,
+        treble=treble,
         onset=onset,
         spectrum=spectrum,
         waveform=waveform,

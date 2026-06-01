@@ -88,7 +88,9 @@ def render(audio_path: str, out_path: str, fps: int, width: int, height: int,
             f = feats.at(i)
             frame = rnd.render(
                 t=i / fps,
-                amp=f["amplitude"], bass=f["bass"], onset=f["onset"],
+                amp=f["amplitude"], bass=f["bass"],
+                melody=f["melody"], treble=f["treble"],
+                onset=f["onset"],
                 spectrum=f["spectrum"], waveform=f["waveform"],
             )
             writer.append_data(frame)
