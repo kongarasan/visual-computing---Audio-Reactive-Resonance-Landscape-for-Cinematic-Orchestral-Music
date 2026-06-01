@@ -49,152 +49,170 @@ uniform int   u_nbands;
 uniform sampler2D u_spectrum;
 uniform sampler2D u_waveform;
 
-const float PI = 3.14159265;
-const vec3 BLUE   = vec3(0.15, 0.45, 1.00);
-const vec3 CYAN   = vec3(0.30, 0.85, 1.00);
-const vec3 PINK   = vec3(1.00, 0.18, 0.95);
-const vec3 PURP   = vec3(0.55, 0.25, 1.00);
-const vec3 GREEN  = vec3(0.10, 0.90, 0.55);
-const vec3 ORANGE = vec3(1.00, 0.55, 0.10);
-const vec3 WHITE  = vec3(0.95, 0.97, 1.00);
-
-// Dynamic palette: melody shifts blue->green, treble shifts pink->orange/white
-vec3 dynBlue()   { return mix(BLUE,   GREEN,  u_melody * 0.6); }
-vec3 dynCyan()   { return mix(CYAN,   WHITE,  u_treble * 0.5); }
-vec3 dynPink()   { return mix(PINK,   ORANGE, u_treble * 0.7); }
-vec3 dynPurp()   { return mix(PURP,   GREEN,  u_melody * 0.4); }
+const float PI   = 3.14159265;
+const vec3  BLUE = vec3(0.08, 0.30, 1.00);
+const vec3  CYAN = vec3(0.18, 0.72, 1.00);
+const vec3  PINK = vec3(0.92, 0.08, 0.92);
+const vec3  PURP = vec3(0.48, 0.12, 0.95);
+const vec3  WHITE = vec3(0.92, 0.96, 1.00);
 
 float band(sampler2D tex, float x01) {
     return texture(tex, vec2(clamp(x01, 0.0, 1.0), 0.5)).r;
 }
 float hash2(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+float bump(float a, float c, float w) { float d = (a-c)/w; return exp(-d*d); }
 
-float bump(float a, float c, float w) {
-    float d = (a - c) / w;
-    return exp(-d * d);
-}
-
-// rounded mountain profile: low ripples near center, taller peaks on the sides
-// onset adds a sharp spike for beat impact
+// Smooth wave mountains: a line at the center, small near the ring,
+// growing into big rounded waves toward the outer edges.
 float mountains(float xn, float t, float react) {
     float a = abs(xn);
+    // rising envelope: 0 at center (a line) -> full toward the edges
+    float env = smoothstep(0.03, 0.45, a);
     float h = 0.0;
-    h += 0.26 * bump(a, 0.52, 0.14);
-    h += 0.20 * bump(a, 0.82, 0.13);
-    h += 0.13 * bump(a, 0.30, 0.09);
-    h += 0.06 * bump(a, 0.12, 0.10);
-    h += 0.03 * sin(xn * 9.0 + t * 0.6);
-    h += 0.18 * u_onset * bump(a, 0.55, 0.20); // beat spike at mid-distance
+    // five rounded mountains per side: small near the ring, growing outward
+    h += 0.10 * bump(a, 0.18, 0.065);
+    h += 0.13 * bump(a, 0.35, 0.070);
+    h += 0.16 * bump(a, 0.52, 0.072);
+    h += 0.20 * bump(a, 0.70, 0.075);
+    h += 0.25 * bump(a, 0.88, 0.080);
+    // gentle sine undulation for a flowing wave feel
+    h += 0.030 * sin(xn * 7.0 + t * 0.5);
+    h += 0.020 * sin(xn * 13.0 + t * 0.8);
+    h *= env;                                  // taper to a line at the center
+    // gentle beat swell, also enveloped so the center stays flat
+    h += 0.10 * u_onset * env * bump(a, 0.70, 0.35);
     h = max(h, 0.0);
-    h *= (0.55 + 0.95 * react);
+    h *= (0.60 + 0.90 * react) * (0.65 + 0.55 * u_amp);
     return h;
 }
 
-vec3 scene(vec2 p) {
-    float ar = u_res.x / u_res.y;
-    float xn = p.x / ar;
-    vec3 col = vec3(0.0);
+vec3 scene(vec2 p, float ar) {
+    float xn  = p.x / ar;   // aspect-corrected x, range +-1
+    vec3  col = vec3(0.0);
 
-    // ===== side equalizer bars (wider clusters, full spectrum mapping) =======
+    // Pre-compute mountain height at this x for bar occlusion
+    float mReact = band(u_waveform, abs(xn));
+    float mHeight = mountains(xn, u_time, mReact);
+
+    // === Soft blue ambient glow (inside ring area) =======================
+    {
+        float dist = length(vec2(xn, p.y - 0.30));
+        col += BLUE * exp(-dist * 1.6) * 0.20 * (0.4 + 0.6 * u_bass);
+    }
+
+    // === Equalizer bars — span the mountain region; mountains occlude them
+    //     so a cluster of bars shows in each valley between peaks ==========
     {
         float a = abs(xn);
-        float cluster = step(0.10, a) * step(a, 0.56);   // expanded band
-        if (cluster > 0.5 && p.y >= 0.0) {
-            float n = 18.0;                               // more bars
-            float fb = (a - 0.10) / (0.56 - 0.10) * n;
-            int bi = int(floor(fb));
-            float bandIdx = (float(bi) + 0.5) / n;
-            float h = band(u_spectrum, bandIdx);
-            h = 0.08 + h * 0.72;                          // taller range
-            float fx = fract(fb);
-            float barw = step(0.10, fx) * step(fx, 0.90);
-            float inbar = step(p.y, h) * barw;
-            float tip = exp(-abs(p.y - h) * 12.0) * barw;
-            // color: low bars = dynBlue, high bars = dynPink, tip = dynCyan
-            vec3 bcol = mix(dynBlue(), dynPink(), clamp(p.y / max(h, 1e-3), 0.0, 1.0));
-            col += bcol * (inbar * 0.80 + tip * 1.0);
-            col += dynCyan() * tip * 0.6 * (1.0 + u_treble);
+        if (a >= 0.12 && a <= 0.96 && p.y >= mHeight) {
+            float n      = 24.0;                       // bars across the whole span
+            float fb     = (a - 0.12) / (0.96 - 0.12) * n;
+            int   bi     = int(floor(fb));
+            float specIdx = (float(bi) + 0.5) / n;
+            float h      = band(u_spectrum, specIdx);
+            // shrink bars near the ring, grow them toward the outer edges
+            float barEnv = smoothstep(0.12, 0.45, a);
+            h = (0.06 + h * 0.42) * barEnv;
+            float fx     = fract(fb);
+            // crisp rectangle: gap between bars, hard top edge
+            float barw   = step(0.18, fx) * step(fx, 0.82);
+            float inbar  = step(p.y, h) * barw;
+            // flat solid CYAN — no gradient, no tip glow
+            col += CYAN * inbar * 0.75;
         }
     }
 
-    // ===== rounded mesh-net mountains (flow through the whole width) ======
+    // === Mesh-net mountains (full width, drawn after bars to cover them) =
     {
-        float react = band(u_waveform, abs(xn));
-        float h = mountains(xn, u_time, react) * (0.75 + 0.5 * u_amp);
-        if (p.y >= 0.0 && p.y <= h) {
-            float edge = h - p.y;
-            float crest = exp(-edge * 22.0);
-            float lh = 1.0 - abs(fract((h - p.y) * 30.0) - 0.5) * 2.0;
-            float lv = 1.0 - abs(fract(p.x * 42.0) - 0.5) * 2.0;
-            float mesh = max(smoothstep(0.86, 1.0, lh),
-                             smoothstep(0.90, 1.0, lv));
-            float spk = step(0.95, hash2(floor(vec2(p.x * 80.0, p.y * 80.0))));
-            vec3 net = mix(dynBlue(), dynCyan(), clamp(p.y / max(h, 1e-3), 0.0, 1.0));
-            col += net * mesh * 1.2;
-            col += dynBlue() * 0.05;
-            col += dynPink() * crest * (1.4 + 0.8 * u_onset); // onset brightens crest
-            col += dynCyan() * spk * (1.0 + u_treble);         // treble adds sparkle
+        if (p.y >= 0.0 && p.y <= mHeight) {
+            float h     = mHeight;
+            float edge  = h - p.y;
+            float crest = exp(-edge * 30.0);
+            // wireframe: iso-height lines + vertical lines
+            float lh = 1.0 - abs(fract((h - p.y) * 26.0) - 0.5) * 2.0;
+            float lv = 1.0 - abs(fract(p.x * 38.0) - 0.5) * 2.0;
+            float mesh = max(smoothstep(0.85, 1.0, lh),
+                             smoothstep(0.88, 1.0, lv));
+            float spk = step(0.965, hash2(floor(vec2(p.x * 72.0, p.y * 72.0))));
+            // Opaque black body first — this occludes any bars underneath
+            col = vec3(0.0);
+            // mesh net: deep purple at the base -> blue -> cyan at the crest
+            float up = clamp(p.y / max(h, 1e-3), 0.0, 1.0);
+            vec3 netcol = mix(mix(PURP, BLUE, up), CYAN, up * up);
+            col += netcol * mesh * 1.15;
+            col += PURP * 0.12;                              // richer purple body fill
+            col += PINK * crest * (1.5 + 0.9 * u_onset);
+            col += CYAN * spk * (0.9 + 0.5 * u_treble);
         }
     }
 
-    // ===== neon ring (dynamic color: melody shifts hue top/bottom) ========
+    // === Large neon ring (cyan top -> magenta bottom, true circle) =======
     {
-        float ringCY = 0.40;
-        float ringR  = 0.52 + 0.015 * u_bass + 0.008 * u_onset;
-        float d = abs(length(vec2(p.x, p.y - ringCY)) - ringR);
-        float core = exp(-d * 150.0);
-        float bloom = exp(-d * 34.0) * 0.22;
-        float ang = atan(p.y - ringCY, p.x);
-        float f = sin(ang) * 0.5 + 0.5;                     // 1 top, 0 bottom
-        vec3 rcol = mix(dynPink(), dynCyan(), f);
-        // melody pulses the ring thickness
-        float pulse = 1.3 + 0.7 * u_onset + 0.4 * u_melody;
-        col += rcol * (core * pulse + bloom) * (1.0 + 0.4 * u_bass);
+        float ringCY = 0.30;
+        float ringR  = 0.42 + 0.012 * u_bass + 0.007 * u_onset;
+        // aspect-corrected distance for a proper circle
+        float dist  = length(vec2(xn, p.y - ringCY));
+        float d     = abs(dist - ringR);
+        float core  = exp(-d * 170.0);
+        float bloom = exp(-d * 38.0) * 0.28;
+        float ang   = atan(p.y - ringCY, xn);
+        float f     = sin(ang) * 0.5 + 0.5;    // 1 = top (cyan), 0 = bottom (pink)
+        vec3  rcol  = mix(PINK, CYAN, f);
+        float pulse = 1.2 + 0.8 * u_onset + 0.3 * u_melody;
+        col += rcol * (core * pulse + bloom) * (1.0 + 0.38 * u_bass);
     }
 
-    // ===== central light flare + horizontal lens streak ==================
+    // === Central light flare + horizontal + vertical streaks =============
     {
-        float r = length(p);
-        float core = exp(-r * 34.0);
-        float glow = exp(-r * 8.0) * (0.30 + 0.35 * u_bass);
-        float streak = exp(-abs(p.y) * 80.0) * exp(-abs(p.x) * 2.0) * 0.8;
-        // flare color shifts: bass=cool white, treble=warm white, onset=flash
-        vec3 flareCol = mix(vec3(0.75, 0.88, 1.0), vec3(1.0, 0.95, 0.80), u_treble);
-        col += flareCol * (core * (1.6 + 2.5 * u_onset + u_melody) + glow);
-        col += dynCyan() * streak * (0.9 + 0.6 * u_amp);
-        // treble adds a faint radial shimmer ring around the flare
-        float shimmer = exp(-abs(r - 0.08 - 0.04 * u_treble) * 60.0) * u_treble;
-        col += dynCyan() * shimmer * 0.6;
+        float r = length(vec2(xn, p.y));
+        float core    = exp(-r * 38.0);
+        float glow    = exp(-r * 9.0) * (0.22 + 0.32 * u_bass);
+        float hstreak = exp(-abs(p.y) * 88.0) * exp(-abs(xn) * 2.2) * 0.75;
+        float vstreak = exp(-abs(xn) * 130.0) * exp(-max(p.y, 0.0) * 4.5) * 0.45;
+        col += WHITE * (core * (1.7 + 2.4 * u_onset) + glow);
+        col += CYAN  * hstreak * (0.85 + 0.5 * u_amp);
+        col += WHITE * vstreak * (0.55 + 0.4 * u_onset);
     }
 
     return col;
 }
 
 void main() {
-    vec2 aspect = vec2(u_res.x / u_res.y, 1.0);
-    vec2 p = (uv - 0.5) * 2.0 * aspect;
-    p.y += 0.30;                                // horizon in lower third
+    float ar = u_res.x / u_res.y;
+    vec2  p  = (uv - 0.5) * 2.0 * vec2(ar, 1.0);
+    p.y     += 0.28;    // horizon in lower third
 
     vec3 col;
     if (p.y >= 0.0) {
-        col = scene(p);
+        col = scene(p, ar);
     } else {
-        vec2 m = vec2(p.x, -p.y);
-        vec3 refl = scene(m);
+        // Mirror reflection
+        vec2  m     = vec2(p.x, -p.y);
+        vec3  refl  = scene(m, ar);
         float depth = -p.y;
-        float fade = exp(-depth * 2.0);
-        float ripple = 1.0 + 0.05 * sin(p.x * 28.0 + u_time * 2.0) * depth;
-        col = refl * fade * 0.55 * ripple;
-        // concentric ripple rings radiating from the center on the floor
-        float fr = length(vec2(p.x, depth * 2.4));
-        float rip = 0.5 + 0.5 * sin(fr * 44.0 - u_time * 3.0);
-        col += dynCyan() * smoothstep(0.80, 1.0, rip) * exp(-fr * 3.0) * 0.4;
+        float fade  = exp(-depth * 2.2);
+        float ripple = 1.0 + 0.04 * sin(p.x * 30.0 + u_time * 2.2) * depth;
+        col = refl * fade * 0.52 * ripple;
+
+        // Perspective grid on floor (horizontal + vertical lines)
+        float xn = p.x / ar;
+        float gz = fract(depth * 12.0 / (depth + 0.25));
+        float gx = fract(xn * 5.5);
+        float gridH = smoothstep(0.88, 1.0, 1.0 - abs(gz * 2.0 - 1.0));
+        float gridV = smoothstep(0.90, 1.0, 1.0 - abs(gx * 2.0 - 1.0));
+        col += PURP * max(gridH, gridV) * exp(-depth * 3.2) * 0.40;  // stronger purple grid
+        col += PURP * exp(-depth * 2.5) * 0.06;                      // faint purple floor wash
+
+        // Concentric ripple rings from center
+        float fr  = length(vec2(xn, depth * 2.2));
+        float rip = 0.5 + 0.5 * sin(fr * 42.0 - u_time * 3.0);
+        col += CYAN * smoothstep(0.82, 1.0, rip) * exp(-fr * 3.8) * 0.32;
     }
 
-    // vivid neon: gentle tonemap that keeps saturation, pure black stays black
-    col *= (0.9 + 0.4 * u_amp);
-    col = col / (col + vec3(0.7));
-    col = pow(col, vec3(0.80));
+    // Neon tonemap: vivid saturation, pure black stays black
+    col *= (0.85 + 0.45 * u_amp);
+    col  = col / (col + vec3(0.65));
+    col  = pow(col, vec3(0.78));
     frag = vec4(col, 1.0);
 }
 """
