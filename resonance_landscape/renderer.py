@@ -45,6 +45,7 @@ uniform float u_bass;
 uniform float u_melody;
 uniform float u_treble;
 uniform float u_onset;
+uniform float u_flow;     // accumulated inward-flow phase (beat-driven speed)
 uniform int   u_nbands;
 uniform sampler2D u_spectrum;
 uniform sampler2D u_waveform;
@@ -72,16 +73,16 @@ float mountains(float xn, float t, float react) {
     // amplitude grows outward (small near the ring, big at the edges)
     float grow = clamp(a, 0.0, 1.15);
 
-    // traveling ridge field: argument (a*k + t*speed) makes the pattern
-    // scroll toward smaller a, i.e. the waves flow inward into the ring.
+    // traveling ridge field: u_flow scrolls the pattern toward smaller a, so
+    // the waves flow inward into the ring. u_flow is accumulated per frame and
+    // speeds up on the beat, so the mountains surge faster with the music.
     float k     = 18.0;     // ~5 rounded ridges per side
-    float speed = 1.6;      // inward flow speed
-    float ridge = 0.5 + 0.5 * cos(a * k + t * speed);
+    float ridge = 0.5 + 0.5 * cos(a * k + u_flow);
     ridge = pow(ridge, 1.4);                       // round the crests
     float h = ridge * (0.08 + 0.30 * grow);
 
     // slower second layer for an organic, rolling-wave feel
-    h += (0.5 + 0.5 * cos(a * k * 0.5 + t * speed * 0.6)) * 0.05 * grow;
+    h += (0.5 + 0.5 * cos(a * k * 0.5 + u_flow * 0.6)) * 0.05 * grow;
 
     h *= env;                                      // taper to a line at center
     // gentle beat swell, also enveloped so the center stays flat
@@ -119,8 +120,8 @@ vec3 scene(vec2 p, float ar) {
             float barEnv = smoothstep(0.12, 0.45, a);
             h = (0.06 + h * 0.42) * barEnv;
             float fx     = fract(fb);
-            // crisp rectangle: gap between bars, hard top edge
-            float barw   = step(0.18, fx) * step(fx, 0.82);
+            // crisp rectangle: medium bar width, medium gap, hard top edge
+            float barw   = step(0.25, fx) * step(fx, 0.75);
             float inbar  = step(p.y, h) * barw;
             // flat solid CYAN — no gradient, no tip glow
             col += CYAN * inbar * 0.75;
@@ -191,13 +192,12 @@ void main() {
     if (p.y >= 0.0) {
         col = scene(p, ar);
     } else {
-        // Mirror reflection
-        vec2  m     = vec2(p.x, -p.y);
+        // ===== GLASSY MIRROR FLOOR ==============================================
+        vec2  m     = vec2(p.x, -p.y);          // clean mirror, no distortion
         vec3  refl  = scene(m, ar);
         float depth = -p.y;
         float fade  = exp(-depth * 2.2);
-        float ripple = 1.0 + 0.04 * sin(p.x * 30.0 + u_time * 2.2) * depth;
-        col = refl * fade * 0.52 * ripple;
+        col = refl * fade * 0.52;
 
         // Perspective grid on floor (horizontal + vertical lines)
         float xn = p.x / ar;
@@ -205,8 +205,8 @@ void main() {
         float gx = fract(xn * 5.5);
         float gridH = smoothstep(0.88, 1.0, 1.0 - abs(gz * 2.0 - 1.0));
         float gridV = smoothstep(0.90, 1.0, 1.0 - abs(gx * 2.0 - 1.0));
-        col += PURP * max(gridH, gridV) * exp(-depth * 3.2) * 0.40;  // stronger purple grid
-        col += PURP * exp(-depth * 2.5) * 0.06;                      // faint purple floor wash
+        col += PURP * max(gridH, gridV) * exp(-depth * 3.2) * 0.40;  // purple grid
+        col += PURP * exp(-depth * 2.5) * 0.06;                      // faint floor wash
 
         // Concentric ripple rings from center
         float fr  = length(vec2(xn, depth * 2.2));
@@ -256,6 +256,10 @@ class ResonanceRenderer:
         self._set("u_melody", 0.0)
         self._set("u_treble", 0.0)
 
+        # accumulated inward-flow phase + last timestamp (for beat-driven speed)
+        self._flow = 0.0
+        self._last_t = None
+
     def _set(self, name, value):
         """Set a uniform if it exists (the GLSL compiler may drop unused ones)."""
         try:
@@ -284,7 +288,19 @@ class ResonanceRenderer:
         self.tex_spectrum.use(location=0)
         self.tex_waveform.use(location=1)
 
+        # Accumulate the inward-flow phase. Base drift + extra speed on beats
+        # (bass + onset) so the mountains surge faster with the music. Phase is
+        # integrated frame-by-frame, so it never jumps when the speed changes.
+        if self._last_t is None:
+            dt = 0.0
+        else:
+            dt = max(0.0, float(t) - self._last_t)
+        self._last_t = float(t)
+        flow_speed = 1.4 + 6.0 * float(bass) + 4.0 * float(onset)
+        self._flow += dt * flow_speed
+
         self._set("u_time", float(t))
+        self._set("u_flow", float(self._flow))
         self._set("u_amp", float(amp))
         self._set("u_bass", float(bass))
         self._set("u_melody", float(melody))
