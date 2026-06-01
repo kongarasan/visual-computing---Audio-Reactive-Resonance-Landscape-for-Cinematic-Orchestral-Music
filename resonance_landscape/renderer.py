@@ -62,23 +62,28 @@ float band(sampler2D tex, float x01) {
 float hash2(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
 float bump(float a, float c, float w) { float d = (a-c)/w; return exp(-d*d); }
 
-// Smooth wave mountains: a line at the center, small near the ring,
-// growing into big rounded waves toward the outer edges.
+// Smooth wave mountains that TRAVEL inward toward the ring, shrinking to a
+// line at the glowing center -- like driving through a cave / archway. The
+// rounded ridges scroll from the outer edges in toward the middle each frame.
 float mountains(float xn, float t, float react) {
     float a = abs(xn);
     // rising envelope: 0 at center (a line) -> full toward the edges
-    float env = smoothstep(0.03, 0.45, a);
-    float h = 0.0;
-    // five rounded mountains per side: small near the ring, growing outward
-    h += 0.10 * bump(a, 0.18, 0.065);
-    h += 0.13 * bump(a, 0.35, 0.070);
-    h += 0.16 * bump(a, 0.52, 0.072);
-    h += 0.20 * bump(a, 0.70, 0.075);
-    h += 0.25 * bump(a, 0.88, 0.080);
-    // gentle sine undulation for a flowing wave feel
-    h += 0.030 * sin(xn * 7.0 + t * 0.5);
-    h += 0.020 * sin(xn * 13.0 + t * 0.8);
-    h *= env;                                  // taper to a line at the center
+    float env  = smoothstep(0.03, 0.42, a);
+    // amplitude grows outward (small near the ring, big at the edges)
+    float grow = clamp(a, 0.0, 1.15);
+
+    // traveling ridge field: argument (a*k + t*speed) makes the pattern
+    // scroll toward smaller a, i.e. the waves flow inward into the ring.
+    float k     = 18.0;     // ~5 rounded ridges per side
+    float speed = 1.6;      // inward flow speed
+    float ridge = 0.5 + 0.5 * cos(a * k + t * speed);
+    ridge = pow(ridge, 1.4);                       // round the crests
+    float h = ridge * (0.08 + 0.30 * grow);
+
+    // slower second layer for an organic, rolling-wave feel
+    h += (0.5 + 0.5 * cos(a * k * 0.5 + t * speed * 0.6)) * 0.05 * grow;
+
+    h *= env;                                      // taper to a line at center
     // gentle beat swell, also enveloped so the center stays flat
     h += 0.10 * u_onset * env * bump(a, 0.70, 0.35);
     h = max(h, 0.0);
