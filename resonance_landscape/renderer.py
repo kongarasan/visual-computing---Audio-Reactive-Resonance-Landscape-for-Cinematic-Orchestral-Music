@@ -46,6 +46,7 @@ uniform float u_melody;
 uniform float u_treble;
 uniform float u_onset;
 uniform float u_flow;     // accumulated inward-flow phase (beat-driven speed)
+uniform float u_ripple;   // accumulated floor-ripple phase (bass-driven speed)
 uniform int   u_nbands;
 uniform sampler2D u_spectrum;
 uniform sampler2D u_waveform;
@@ -56,6 +57,14 @@ const vec3  CYAN = vec3(0.18, 0.72, 1.00);
 const vec3  PINK = vec3(0.92, 0.08, 0.92);
 const vec3  PURP = vec3(0.48, 0.12, 0.95);
 const vec3  WHITE = vec3(0.92, 0.96, 1.00);
+const vec3  TEAL = vec3(0.10, 0.95, 0.65);   // melody-rich (strings/winds)
+const vec3  WARM = vec3(1.00, 0.55, 0.18);   // treble-rich (cymbals/brass)
+
+// Music-driven palette: melody pulls the body toward teal-green, treble warms
+// the highlights toward orange/white. Matches the "color follows the music" idea.
+vec3 dynBody() { return mix(BLUE, TEAL, clamp(u_melody, 0.0, 1.0) * 0.55); }
+vec3 dynCrest(){ return mix(PINK, WARM, clamp(u_treble, 0.0, 1.0) * 0.60); }
+vec3 dynHi()   { return mix(CYAN, WHITE, clamp(u_treble, 0.0, 1.0) * 0.50); }
 
 float band(sampler2D tex, float x01) {
     return texture(tex, vec2(clamp(x01, 0.0, 1.0), 0.5)).r;
@@ -73,16 +82,17 @@ float mountains(float xn, float t, float react) {
     // amplitude grows outward (small near the ring, big at the edges)
     float grow = clamp(a, 0.0, 1.15);
 
-    // traveling ridge field: u_flow scrolls the pattern toward smaller a, so
-    // the waves flow inward into the ring. u_flow is accumulated per frame and
-    // speeds up on the beat, so the mountains surge faster with the music.
+    // FORWARD-TUNNEL motion: ridges are born small near the center (the ring)
+    // and stream OUTWARD, growing as they sweep toward the screen edges -- the
+    // sensation of the camera flying forward into the cave. u_flow is the
+    // accumulated, beat-driven phase, so you accelerate on the music.
     float k     = 18.0;     // ~5 rounded ridges per side
-    float ridge = 0.5 + 0.5 * cos(a * k + u_flow);
+    float ridge = 0.5 + 0.5 * cos(a * k - u_flow);
     ridge = pow(ridge, 1.4);                       // round the crests
     float h = ridge * (0.08 + 0.30 * grow);
 
     // slower second layer for an organic, rolling-wave feel
-    h += (0.5 + 0.5 * cos(a * k * 0.5 + u_flow * 0.6)) * 0.05 * grow;
+    h += (0.5 + 0.5 * cos(a * k * 0.5 - u_flow * 0.6)) * 0.05 * grow;
 
     h *= env;                                      // taper to a line at center
     // gentle beat swell, also enveloped so the center stays flat
@@ -92,7 +102,8 @@ float mountains(float xn, float t, float react) {
     return h;
 }
 
-vec3 scene(vec2 p, float ar) {
+
+vec3 scene(vec2 p, float ar, float isRefl) {
     float xn  = p.x / ar;   // aspect-corrected x, range +-1
     vec3  col = vec3(0.0);
 
@@ -112,9 +123,12 @@ vec3 scene(vec2 p, float ar) {
         float a = abs(xn);
         if (a >= 0.12 && a <= 0.96 && p.y >= mHeight) {
             float n      = 24.0;                       // bars across the whole span
-            float fb     = (a - 0.12) / (0.96 - 0.12) * n;
+            // the bar lattice drifts OUTWARD with the tunnel motion (u_flow/k),
+            // so bars stream past you as the camera flies forward.
+            float drift  = u_flow / 18.0;
+            float fb     = (a - 0.12) / (0.96 - 0.12) * n - drift;
             int   bi     = int(floor(fb));
-            float specIdx = (float(bi) + 0.5) / n;
+            float specIdx = fract((float(bi) + 0.5) / n);
             float h      = band(u_spectrum, specIdx);
             // shrink bars near the ring, grow them toward the outer edges
             float barEnv = smoothstep(0.12, 0.45, a);
@@ -142,30 +156,43 @@ vec3 scene(vec2 p, float ar) {
             float spk = step(0.965, hash2(floor(vec2(p.x * 72.0, p.y * 72.0))));
             // Opaque black body first — this occludes any bars underneath
             col = vec3(0.0);
-            // mesh net: deep purple at the base -> blue -> cyan at the crest
+            // mesh net: deep purple base -> music-driven body -> bright crest.
+            // melody shifts the body teal, treble warms the crest highlight.
             float up = clamp(p.y / max(h, 1e-3), 0.0, 1.0);
-            vec3 netcol = mix(mix(PURP, BLUE, up), CYAN, up * up);
+            vec3 netcol = mix(mix(PURP, dynBody(), up), dynHi(), up * up);
             col += netcol * mesh * 1.15;
             col += PURP * 0.12;                              // richer purple body fill
-            col += PINK * crest * (1.5 + 0.9 * u_onset);
-            col += CYAN * spk * (0.9 + 0.5 * u_treble);
+            col += dynCrest() * crest * (1.5 + 0.9 * u_onset);
+            col += dynHi() * spk * (0.9 + 0.5 * u_treble);
         }
     }
 
-    // === Large neon ring (cyan top -> magenta bottom, true circle) =======
+    // === Neon resonance ring (perfect circle) + radiating resonance ========
     {
         float ringCY = 0.30;
         float ringR  = 0.42 + 0.012 * u_bass + 0.007 * u_onset;
-        // aspect-corrected distance for a proper circle
+        // aspect-corrected distance -> a perfect circle regardless of aspect
         float dist  = length(vec2(xn, p.y - ringCY));
-        float d     = abs(dist - ringR);
-        float core  = exp(-d * 170.0);
-        float bloom = exp(-d * 38.0) * 0.28;
+        float rr    = dist - ringR;            // signed distance from the ring
+        float d     = abs(rr);
+        // crisp, even ring core + soft bloom (uniform all the way around)
+        float core  = exp(-d * 190.0);
+        float bloom = exp(-d * 40.0) * 0.26;
         float ang   = atan(p.y - ringCY, xn);
-        float f     = sin(ang) * 0.5 + 0.5;    // 1 = top (cyan), 0 = bottom (pink)
-        vec3  rcol  = mix(PINK, CYAN, f);
+        float f     = sin(ang) * 0.5 + 0.5;    // 1 = top, 0 = bottom
+        vec3  rcol  = mix(dynCrest(), dynHi(), f);
         float pulse = 1.2 + 0.8 * u_onset + 0.3 * u_melody;
         col += rcol * (core * pulse + bloom) * (1.0 + 0.38 * u_bass);
+
+        // RESONANCE: concentric halos radiating OUTWARD from the ring only
+        // (rr > 0), animated with the bass-driven phase (u_ripple) and pulsing
+        // on the beat. Skipped in the mirror reflection (isRefl) so it stays in
+        // the real space outside the circle.
+        float outside = smoothstep(0.0, 0.02, rr);          // 0 inside, 1 outside
+        float reson   = 0.5 + 0.5 * sin(rr * 34.0 - u_ripple);
+        float resMask = smoothstep(0.55, 1.0, reson) * exp(-rr * 4.5) * outside;
+        col += rcol * resMask * (0.16 + 0.40 * u_onset + 0.28 * u_bass)
+                    * (1.0 - isRefl);
     }
 
     // === Central light flare + horizontal + vertical streaks =============
@@ -175,9 +202,19 @@ vec3 scene(vec2 p, float ar) {
         float glow    = exp(-r * 9.0) * (0.22 + 0.32 * u_bass);
         float hstreak = exp(-abs(p.y) * 88.0) * exp(-abs(xn) * 2.2) * 0.75;
         float vstreak = exp(-abs(xn) * 130.0) * exp(-max(p.y, 0.0) * 4.5) * 0.45;
-        col += WHITE * (core * (1.7 + 2.4 * u_onset) + glow);
-        col += CYAN  * hstreak * (0.85 + 0.5 * u_amp);
+        // flare warms toward orange/white as treble rises
+        col += mix(WHITE, WARM, u_treble * 0.35) * (core * (1.7 + 2.4 * u_onset) + glow);
+        col += dynHi() * hstreak * (0.85 + 0.5 * u_amp);
         col += WHITE * vstreak * (0.55 + 0.4 * u_onset);
+
+        // Radial speed-streaks shooting OUTWARD from the flare -> forward motion.
+        // Streaks are keyed to angle (so they're stable rays) and pulse outward
+        // along r with the tunnel phase u_flow; faint, fade near the center.
+        float ang2 = atan(p.y, xn);
+        float rays = hash2(vec2(floor(ang2 * 12.0), 0.0));        // random ray per sector
+        float along = 0.5 + 0.5 * sin(r * 30.0 - u_flow + rays * 6.28);
+        float streak = smoothstep(0.75, 1.0, along) * smoothstep(0.05, 0.5, r) * exp(-r * 2.0);
+        col += dynHi() * streak * 0.10 * (0.6 + 0.8 * u_bass);
     }
 
     return col;
@@ -190,11 +227,11 @@ void main() {
 
     vec3 col;
     if (p.y >= 0.0) {
-        col = scene(p, ar);
+        col = scene(p, ar, 0.0);                 // real scene
     } else {
         // ===== GLASSY MIRROR FLOOR ==============================================
         vec2  m     = vec2(p.x, -p.y);          // clean mirror, no distortion
-        vec3  refl  = scene(m, ar);
+        vec3  refl  = scene(m, ar, 1.0);         // reflection: no resonance halos
         float depth = -p.y;
         float fade  = exp(-depth * 2.2);
         col = refl * fade * 0.52;
@@ -208,9 +245,10 @@ void main() {
         col += PURP * max(gridH, gridV) * exp(-depth * 3.2) * 0.40;  // purple grid
         col += PURP * exp(-depth * 2.5) * 0.06;                      // faint floor wash
 
-        // Concentric ripple rings from center
+        // Concentric ripple rings from center, travelling outward at the
+        // bass-driven speed (u_ripple): race out on heavy bass, crawl when quiet.
         float fr  = length(vec2(xn, depth * 2.2));
-        float rip = 0.5 + 0.5 * sin(fr * 42.0 - u_time * 3.0);
+        float rip = 0.5 + 0.5 * sin(fr * 42.0 - u_ripple);
         col += CYAN * smoothstep(0.82, 1.0, rip) * exp(-fr * 3.8) * 0.32;
     }
 
@@ -218,6 +256,40 @@ void main() {
     col *= (0.85 + 0.45 * u_amp);
     col  = col / (col + vec3(0.65));
     col  = pow(col, vec3(0.78));
+    frag = vec4(col, 1.0);
+}
+"""
+
+# Post-process bloom: sample the rendered scene, blur its bright pixels with a
+# Gaussian kernel, and add that glow back. This gives the whole scene a soft,
+# cinematic neon halo instead of the per-element fake glows.
+BLOOM_SHADER = """
+#version 330
+in vec2 uv;
+out vec4 frag;
+uniform sampler2D u_scene;
+uniform vec2  u_res;
+uniform float u_strength;
+
+void main() {
+    vec3 base = texture(u_scene, uv).rgb;
+    vec2 px   = 1.0 / u_res;
+    vec3 bloom = vec3(0.0);
+    float total = 0.0;
+    // 9x9 Gaussian over the bright parts only (smoothstep threshold)
+    for (int j = -4; j <= 4; j++) {
+        for (int i = -4; i <= 4; i++) {
+            vec2 o = vec2(float(i), float(j)) * px * 2.2;
+            vec3 s = texture(u_scene, uv + o).rgb;
+            float b = max(s.r, max(s.g, s.b));
+            float bright = smoothstep(0.55, 1.0, b);
+            float w = exp(-float(i * i + j * j) / 8.0);
+            bloom += s * bright * w;
+            total += w;
+        }
+    }
+    bloom /= max(total, 1e-3);
+    vec3 col = base + bloom * u_strength;
     frag = vec4(col, 1.0);
 }
 """
@@ -233,11 +305,24 @@ class ResonanceRenderer:
         self.prog = self.ctx.program(
             vertex_shader=VERTEX_SHADER, fragment_shader=FRAGMENT_SHADER
         )
+        self.prog_bloom = self.ctx.program(
+            vertex_shader=VERTEX_SHADER, fragment_shader=BLOOM_SHADER
+        )
 
         quad = np.array([-1, -1, 1, -1, -1, 1, 1, 1], dtype="f4")
         self.vbo = self.ctx.buffer(quad.tobytes())
         self.vao = self.ctx.simple_vertex_array(self.prog, self.vbo, "in_pos")
+        self.vao_bloom = self.ctx.simple_vertex_array(
+            self.prog_bloom, self.vbo, "in_pos"
+        )
 
+        # Pass 1 renders the scene into this offscreen texture; pass 2 (bloom)
+        # samples it and writes the final image into self.fbo.
+        self.scene_tex = self.ctx.texture((width, height), 3, dtype="f1")
+        self.scene_tex.filter = (moderngl.LINEAR, moderngl.LINEAR)
+        self.scene_tex.repeat_x = False
+        self.scene_tex.repeat_y = False
+        self.fbo_scene = self.ctx.framebuffer(color_attachments=[self.scene_tex])
         self.fbo = self.ctx.framebuffer(
             color_attachments=[self.ctx.texture((width, height), 4)]
         )
@@ -249,6 +334,11 @@ class ResonanceRenderer:
             t.repeat_x = False
             t.repeat_y = False
 
+        # bloom program uniforms (set once)
+        self.prog_bloom["u_res"].value = (float(width), float(height))
+        self.prog_bloom["u_scene"].value = 2
+        self.prog_bloom["u_strength"].value = 0.85
+
         self._set("u_res", (float(width), float(height)))
         self._set("u_nbands", n_bands)
         self._set("u_spectrum", 0)
@@ -256,8 +346,9 @@ class ResonanceRenderer:
         self._set("u_melody", 0.0)
         self._set("u_treble", 0.0)
 
-        # accumulated inward-flow phase + last timestamp (for beat-driven speed)
+        # accumulated phases + last timestamp (for beat/bass-driven speeds)
         self._flow = 0.0
+        self._ripple = 0.0
         self._last_t = None
 
     def _set(self, name, value):
@@ -298,26 +389,38 @@ class ResonanceRenderer:
         self._last_t = float(t)
         flow_speed = 1.4 + 6.0 * float(bass) + 4.0 * float(onset)
         self._flow += dt * flow_speed
+        # Floor ripple speed scales with bass: slow when quiet, fast on heavy bass.
+        ripple_speed = 3.0 + 28.0 * float(bass)
+        self._ripple += dt * ripple_speed
 
         self._set("u_time", float(t))
         self._set("u_flow", float(self._flow))
+        self._set("u_ripple", float(self._ripple))
         self._set("u_amp", float(amp))
         self._set("u_bass", float(bass))
         self._set("u_melody", float(melody))
         self._set("u_treble", float(treble))
         self._set("u_onset", float(onset))
 
-        self.fbo.use()
+        # Pass 1: render the scene into the offscreen texture.
+        self.fbo_scene.use()
         self.ctx.clear(0.0, 0.0, 0.0, 1.0)
         self.vao.render(moderngl.TRIANGLE_STRIP)
+
+        # Pass 2: bloom composite -> final framebuffer.
+        self.scene_tex.use(location=2)
+        self.fbo.use()
+        self.ctx.clear(0.0, 0.0, 0.0, 1.0)
+        self.vao_bloom.render(moderngl.TRIANGLE_STRIP)
 
         data = self.fbo.read(components=3, dtype="f1")
         img = np.frombuffer(data, dtype=np.uint8).reshape(self.height, self.width, 3)
         return np.flipud(img).copy()
 
     def release(self):
-        for o in (self.vao, self.vbo, self.tex_spectrum, self.tex_waveform,
-                  self.fbo, self.prog, self.ctx):
+        for o in (self.vao, self.vao_bloom, self.vbo, self.tex_spectrum,
+                  self.tex_waveform, self.scene_tex, self.fbo_scene, self.fbo,
+                  self.prog, self.prog_bloom, self.ctx):
             try:
                 o.release()
             except Exception:

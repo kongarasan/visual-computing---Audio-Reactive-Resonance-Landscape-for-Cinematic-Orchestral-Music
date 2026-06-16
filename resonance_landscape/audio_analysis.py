@@ -49,14 +49,38 @@ class AudioFeatures:
         }
 
 
-def _normalize(x: np.ndarray, percentile: float = 99.0) -> np.ndarray:
-    """Robustly scale to roughly 0..1 using a high percentile (avoids outliers)."""
+def _compress(x: np.ndarray) -> np.ndarray:
+    """Perceptual compression of a power signal -> closer to how we hear loudness.
+
+    The spectrogram is power (magnitude^2); sqrt brings it back to magnitude so a
+    quiet passage is not crushed against a few loud transients."""
+    return np.sqrt(np.maximum(np.asarray(x, dtype=np.float32), 0.0))
+
+
+def _normalize(
+    x: np.ndarray, lo: float = 5.0, hi: float = 99.0, gamma: float = 1.0
+) -> np.ndarray:
+    """Robust min-max contrast stretch to 0..1.
+
+    Uses a low percentile as the noise floor and a high percentile as the
+    reference peak, so the full dynamic range of the track is used (better
+    contrast than a top-only divide). Both ends are robust to outliers.
+    `gamma` < 1 lifts quiet detail; > 1 emphasises peaks.
+    """
     x = np.asarray(x, dtype=np.float32)
     x = np.maximum(x, 0.0)
-    ref = np.percentile(x, percentile) if x.size else 1.0
-    if ref <= 1e-9:
-        return np.zeros_like(x)
-    return np.clip(x / ref, 0.0, 1.0)
+    if x.size == 0:
+        return x
+    floor = float(np.percentile(x, lo))
+    ref = float(np.percentile(x, hi))
+    if ref - floor <= 1e-9:
+        # near-constant signal: fall back to plain max scaling
+        m = float(x.max())
+        return np.zeros_like(x) if m <= 1e-9 else np.clip(x / m, 0.0, 1.0)
+    y = np.clip((x - floor) / (ref - floor), 0.0, 1.0)
+    if gamma != 1.0:
+        y = np.power(y, gamma, dtype=np.float32)
+    return y
 
 
 def _resample_to_frames(x: np.ndarray, n_frames: int) -> np.ndarray:
@@ -101,23 +125,25 @@ def analyze(
     amplitude = _normalize(rms)
 
     # --- Bass energy (20-200 Hz) ----------------------------------------------
+    # Perceptual compression (sqrt) then a robust stretch; a slight gamma lift
+    # keeps the low end visibly responsive without clipping on big hits.
     bass_mask = (freqs >= 20) & (freqs <= 200)
-    bass_raw = S[bass_mask, :].sum(axis=0)
-    bass = _normalize(bass_raw)
+    bass_raw = _compress(S[bass_mask, :].sum(axis=0))
+    bass = _normalize(bass_raw, gamma=0.8)
 
     # --- Melody energy (200-2000 Hz) ------------------------------------------
     melody_mask = (freqs >= 200) & (freqs <= 2000)
-    melody_raw = S[melody_mask, :].sum(axis=0)
+    melody_raw = _compress(S[melody_mask, :].sum(axis=0))
     melody = _normalize(melody_raw)
 
     # --- Treble energy (4000-12000 Hz) ----------------------------------------
     treble_mask = (freqs >= 4000) & (freqs <= 12000)
-    treble_raw = S[treble_mask, :].sum(axis=0)
-    treble = _normalize(treble_raw)
+    treble_raw = _compress(S[treble_mask, :].sum(axis=0))
+    treble = _normalize(treble_raw, gamma=0.85)
 
     # --- Onset strength --------------------------------------------------------
     onset_env = librosa.onset.onset_strength(y=y, sr=sr, hop_length=hop)
-    onset = _normalize(onset_env, percentile=97.0)
+    onset = _normalize(onset_env, hi=97.0)
 
     # --- Frequency bands (log-spaced) for equalizer ----------------------------
     # Map linear FFT bins into n_bands log-spaced bands.
